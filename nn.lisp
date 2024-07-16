@@ -74,10 +74,10 @@
     (setf (slot-value p 'engine::grad) 0)))
 
 (let ((mlp (make-instance 'mlp :dimensions (list 3 4 4 1)))
-      (xs (list (list 2 3 -1) (list 3 -1 .5) (list .5 1 1) (list 1 1 -1)))
+      (xs (list (list 2 3 -1) (list 3 -1 0.5) (list 0.5 1 1) (list 1 1 -1)))
       (ys (list 1 -1 -1 1))
       loss)
-  (loop repeat 10 do
+  (loop repeat 30 do
     (let ((ypred (loop for x in xs collect (forward mlp x))))
       (engine:letvalue* ((l (loop for ygt in ys
                                   for yout in ypred
@@ -85,8 +85,10 @@
                                   do (setf sum (engine:+ sum (engine:expt (engine:- yout ygt) 2)))
                                   finally (return sum))))
         (setf loss l)
+        (zero-grad mlp)
         (engine:backward l)
         (dolist (p (parameters mlp))
-          (incf (engine::data p) (* -0.01 (engine::grad p)))))))
+          (incf (engine::data p) (* -0.01 (engine::grad p))))
+        (break "~a ~a" l ypred))))
   (gtfl:reset-gtfl)
   (gtfl:gtfl-out (engine:draw-tree* loss)))
