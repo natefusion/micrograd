@@ -88,7 +88,6 @@
         (zero-grad mlp)
         (engine:backward l)
         (dolist (p (parameters mlp))
-          (incf (engine::data p) (* -0.01 (engine::grad p))))
-        (break "~a ~a" l ypred))))
+          (incf (engine::data p) (* -0.01 (engine::grad p)))))))
   (gtfl:reset-gtfl)
   (gtfl:gtfl-out (engine:draw-tree* loss)))

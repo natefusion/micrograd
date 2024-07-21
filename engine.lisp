@@ -3,39 +3,39 @@
   (:shadow
    :* :+ :- :/ :expt :tanh)
   (:export
-   :* :+ :- :/ :expt :tanh :letvalue* :backward :draw-tree* :value :relu)
-  )
+   :* :+ :- :/ :expt :tanh :letvalue* :backward :draw-tree* :value :relu))
 
 (in-package :engine)
 
 ;; (ql:quickload "gtfl")
 (gtfl:start-gtfl)
 
-(defclass value ()
+(defclass tensor ()
   ((data
-    :accessor data
-    :initarg :data)
+    :initarg :data
+    :type (simple-array))
+   (local-grads
+    :initarg :local-grads
+    :type (vector (simple-array)))
    (grad
-    :accessor grad
-    :initform 0)
+    :type (simple-array))
+   (requires-grad
+    :type boolean)
    (children
     :initarg :children
-    :initform nil)
+    :type (vector 'tensor))
    (op
     :initarg :op
+    :type symbol
     :initform nil)
    (name
     :initarg :name
-    :initform nil)
-   (local-grads
-    :initarg :local-grads
+    :type symbol
     :initform nil)))
 
-(defmethod initialize-instance :after ((obj value) &key))
-
-(defmethod print-object ((obj value) stream) 
+(defmethod print-object ((obj tensor) stream) 
   (print-unreadable-object (obj stream :type 't)
-    (format stream "data = ~a" (slot-value obj 'data))))
+    (format stream "~a has data ~a" (slot-value obj 'name) (slot-value obj 'data))))
 
 (defun draw-node (string) 
   (gtfl:who 
@@ -50,60 +50,97 @@
          (gtfl:who-lambda (draw-node (format nil "[~a=~a, ∂~a/∂~a=~a]~:[~; &lt;- ~a~]" name data p-name name grad op op)))
          (mapcar (lambda (x) (gtfl:who-lambda (draw-tree* x parent))) children)))))
 
-(defgeneric + (a b)
-  (:method ((a value) (b value))
-    (make-instance
-     'value
-     :data (cl:+ (data a) (data b))
-     :children (list a b)
-     :local-grads (list 1 1)
-     :op '+))
-  (:method ((a value) (b number)) (+ a (make-instance 'value :data b)))
-  (:method ((a number) (b value)) (+ (make-instance 'value :data a) b))
-  (:method ((a number) (b number)) (+ (make-instance 'value :data a) (make-instance 'value :data b))))
+(declaim (ftype (function (tensor tensor) (values tensor &optional)) + * - /)
+         (ftype (function (tensor) (values tensor &optional)) tanh relu)
+         (ftype (function (tensor) null) backward)
+         (ftype (function (tensor number)) expt))
 
-(defgeneric * (a b)
-  (:method ((a value) (b value))
-    (make-instance
-     'value
-     :data (cl:* (data a) (data b))
-     :children (list a b)
-     :local-grads (list (data b) (data a))
-     :op '*))
-  (:method ((a number) (b value)) (* (make-instance 'value :data a) b))
-  (:method ((a value) (b number)) (* a (make-instance 'value :data b)))
-  (:method ((a number) (b number)) (* (make-instance 'value :data a) (make-instance 'value :data b))))
+(defmacro array-map ((var dimensions) &body body)
+  `(loop for ,var below (apply #'cl:* ,dimensions)
+         with result = (make-array ,dimensions)
+         do (setf (row-major-aref result ,var) ,@body)
+         finally (return result)))
 
-(defun - (a b) (+ a (* b -1)))
-(defun / (a b) (* a (expt b -1)))
+(defun + (a b)
+  (with-slots ((ad data)) a
+    (with-slots ((bd data)) b
+      (let ((new
+              (cond ((= 1 (array-total-size ad))
+                     (array-map (i (array-dimensions bd)) (cl:+ (row-major-aref bd i) (row-major-aref ad 0))))
+                    ((= 1 (array-total-size bd))
+                     (array-map (i (array-dimensions ad)) (cl:+ (row-major-aref ad i) (row-major-aref bd 0))))
+                    ((= (array-total-size ad) (array-total-size bd))
+                     (array-map (i (array-dimensions ad)) (cl:+ (row-major-aref ad i) (row-major-aref bd i))))
+                    (t
+                     (error "Cannot add TENSOR A that has shape ~a with TENSOR B that has shape ~a"
+                            (array-dimensions ad) (array-dimensions bd))))))
+        (make-instance
+         'tensor
+         :data new 
+         :children (vector a b)
+         :local-grads
+         (vector (make-array (array-dimensions new) :initial-element 1)
+                 (make-array (array-dimensions new) :initial-element 1))
+         :op '+)))))
 
-(defgeneric tanh (a)
-  (:method ((a value))
-    (let ((tanh (cl:tanh (data a))))
+(defun * (a b)
+  (with-slots ((ad data)) a
+    (with-slots ((bd data)) b
+       (let ((new
+               (cond ((= 1 (array-total-size ad))
+                      (array-map (i (array-dimensions bd)) (cl:* (row-major-aref bd i) (row-major-aref ad 0))))
+                     ((= 1 (array-total-size bd))
+                      (array-map (i (array-dimensions ad)) (cl:* (row-major-aref ad i) (row-major-aref bd 0))))
+                     ((= (array-total-size ad) (array-total-size bd))
+                      (array-map (i (array-dimensions ad)) (cl:* (row-major-aref ad i) (row-major-aref bd i))))
+                     (t
+                      (error "Cannot add TENSOR A that has shape ~a with TENSOR B that has shape ~a"
+                             (array-dimensions ad) (array-dimensions bd))))))
+         (make-instance
+          'tensor
+          :data new
+          :children (vector a b)
+          :local-grads (vector bd ad)
+          :op '*)))))
+
+(defun - (a b) (+ a (* (make-instance 'tensor :data #(-1)) b)))
+(defun / (a b) (* a (expt b (make-instance 'tensor :data #(-1)))))
+
+(defun tanh (a)
+  (with-slots (data) a
+    (let ((tanh (array-map (i (array-dimensions data)) (cl:tanh (row-major-aref data i)))))
       (make-instance
-       'value
+       'tensor
        :data tanh
-       :children (list a)
-       :local-grads (list (cl:- 1 (cl:expt tanh 2)))
+       :children #(a)
+       :local-grads
+       (vector (array-map (i (array-dimensions data))
+                 (cl:- 1 (cl:expt (row-major-aref tanh i) 2))))
        :op 'tanh))))
 
-(defgeneric expt (base power)
-  (:method ((base value) (power number))
+(defun relu (a)
+  (with-slots (data) a
     (make-instance
-     'value
-     :data (cl:expt (data base) power)
-     :children (list base)
-     :local-grads (list (cl:* power (cl:expt (data base) (1- power))))
-     :op (read-from-string (format nil "^~a" power)))))
-
-(defgeneric relu (a)
-  (:method ((a value))
-    (make-instance
-     'value
-     :data (if (> (data a) 0) (data a) 0)
-     :children (list a)
-     :local-grads (list (if (> (data a) 0) 1 0))
+     'tensor
+     :data
+     (array-map (i (array-dimensions data))
+       (if (> (row-major-aref data i) 0) (row-major-aref data i) 0)) 
+     :children #(a)
+     :local-grads
+     (vector (array-map (i (array-dimensions data))
+               (if (> (row-major-aref data i) 0) 1 0)))
      :op 'relu)))
+
+(defun expt (base power)
+  (with-slots (data) base
+    (make-instance
+     'tensor
+     :data (array-map (i (array-dimensions data)) (cl:expt (row-major-aref data i) power)) 
+     :children #(base)
+     :local-grads
+     (vector (array-map (i (array-dimensions data))
+               (cl:* power (cl:expt (row-major-aref data i) (1- power)))))
+     :op (read-from-string (format nil "^~a" power)))))
 
 (defun backward (a)
   (let ((topo nil)
@@ -115,11 +152,18 @@
                    (build-topo child))
                  (push v topo))))
       (build-topo a)
-      (setf (grad a) 1)
+      (dotimes (i (array-total-size (slot-value a 'data)))
+        (setf (row-major-aref (slot-value a 'data) i) 1))
       (dolist (v topo)
-        (loop for child in (slot-value v 'children)
-              for local-grad in (slot-value v 'local-grads)
-              do (incf (grad child) (cl:* local-grad (grad v))))))))
+        (with-slots (children local-grads (v-grad grad)) v
+          (loop for child across children
+                for local-grad across local-grads
+                do (with-slots ((child-grad grad)) child
+                     (dotimes (i (array-total-size child-grad))
+                       (incf (row-major-aref child-grad i)
+                             (cl:* (row-major-aref local-grad i)
+                                   (row-major-aref v-grad i)))))))))))
+
 
 (defmacro letvalue* ((&rest bindings) &body body)
   (loop for x in bindings
@@ -129,25 +173,3 @@
                            (declare (value ,@vars))
                            (setf ,@setfs)
                            ,@body))))
-
-;; (letvalue* ((x1 (make-instance 'value :data 2))
-;;             (x2 (make-instance 'value :data 0))
-;;             (w1 (make-instance 'value :data -3))
-;;             (w2 (make-instance 'value :data 1))
-;;             (b  (make-instance 'value :data 6.8813735870195432))
-;;             (x1*w1 (* x1 w1))
-;;             (x2*w2 (* x2 w2))
-;;             (x1*w1+x2*w2 (+ x1*w1 x2*w2))
-;;             (n (+ x1*w1+x2*w2 b))
-;;             (o (tanh n)))
-;;   (backward o)
-;;   (gtfl:reset-gtfl)
-;;   (gtfl:gtfl-out (draw-tree* o)))
-
-;; (letvalue* ((a (make-instance 'value :data 3))
-;;             (b (+ a a)))
-;;   (backward b)
-;;   (gtfl:reset-gtfl)
-;;   (gtfl:gtfl-out (draw-tree* b)))
-
-
