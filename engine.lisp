@@ -3,6 +3,8 @@
   (:shadow
    :* :+ :- :/ :expt :tanh)
   (:export
+   ;; Don't specify symbols to export using keywords. This puts copies of
+   ;; those symbols into the keyword package as well, wasting space.
    :* :+ :- :/ :expt :tanh :letvalue* :backward :draw-tree* :value :relu))
 
 (in-package :engine)
@@ -61,47 +63,35 @@
          do (setf (row-major-aref result ,var) ,@body)
          finally (return result)))
 
+(defun tensor-op (op t1 t2)
+  (let ((dim-t1 (array-dimensions t1))
+        (len-t1 (array-total-size t1))
+        (dim-t2 (array-dimensions t2))
+        (len-t2 (array-total-size t2)))
+    (cond ((= 1 len-t1)      (array-map (i dim-t2) (funcall op (row-major-aref t2 i) (row-major-aref t1 0))))
+          ((= 1 len-t2)      (array-map (i dim-t1) (funcall op (row-major-aref t1 i) (row-major-aref t2 0))))
+          ((= len-t1 len-t2) (array-map (i dim-t1) (funcall op (row-major-aref t1 i) (row-major-aref t2 i))))
+          (t (error "Cannot add TENSOR A that has shape ~a with TENSOR B that has shape ~a" dim-t1 dim-t2)))))
+
 (defun + (a b)
-  (with-slots ((ad data)) a
-    (with-slots ((bd data)) b
-      (let ((new
-              (cond ((= 1 (array-total-size ad))
-                     (array-map (i (array-dimensions bd)) (cl:+ (row-major-aref bd i) (row-major-aref ad 0))))
-                    ((= 1 (array-total-size bd))
-                     (array-map (i (array-dimensions ad)) (cl:+ (row-major-aref ad i) (row-major-aref bd 0))))
-                    ((= (array-total-size ad) (array-total-size bd))
-                     (array-map (i (array-dimensions ad)) (cl:+ (row-major-aref ad i) (row-major-aref bd i))))
-                    (t
-                     (error "Cannot add TENSOR A that has shape ~a with TENSOR B that has shape ~a"
-                            (array-dimensions ad) (array-dimensions bd))))))
-        (make-instance
-         'tensor
-         :data new 
-         :children (vector a b)
-         :local-grads
-         (vector (make-array (array-dimensions new) :initial-element 1)
-                 (make-array (array-dimensions new) :initial-element 1))
-         :op '+)))))
+  (let ((new (tensor-op #'cl:+ (slot-value a 'data) (slot-value b 'data))))
+    (make-instance
+     'tensor
+     :data new 
+     :children (vector a b)
+     :local-grads
+     (vector (make-array (array-dimensions new) :initial-element 1)
+             (make-array (array-dimensions new) :initial-element 1))
+     :op '+)))
 
 (defun * (a b)
-  (with-slots ((ad data)) a
-    (with-slots ((bd data)) b
-       (let ((new
-               (cond ((= 1 (array-total-size ad))
-                      (array-map (i (array-dimensions bd)) (cl:* (row-major-aref bd i) (row-major-aref ad 0))))
-                     ((= 1 (array-total-size bd))
-                      (array-map (i (array-dimensions ad)) (cl:* (row-major-aref ad i) (row-major-aref bd 0))))
-                     ((= (array-total-size ad) (array-total-size bd))
-                      (array-map (i (array-dimensions ad)) (cl:* (row-major-aref ad i) (row-major-aref bd i))))
-                     (t
-                      (error "Cannot add TENSOR A that has shape ~a with TENSOR B that has shape ~a"
-                             (array-dimensions ad) (array-dimensions bd))))))
-         (make-instance
-          'tensor
-          :data new
-          :children (vector a b)
-          :local-grads (vector bd ad)
-          :op '*)))))
+  (let ((new (tensor-op #'cl:* (slot-value a 'data) (slot-value b 'data))))
+    (make-instance
+     'tensor
+     :data new
+     :children (vector a b)
+     :local-grads (vector (slot-value b 'data) (slot-value a 'data))
+     :op '*)))
 
 (defun - (a b) (+ a (* (make-instance 'tensor :data #(-1)) b)))
 (defun / (a b) (* a (expt b (make-instance 'tensor :data #(-1)))))
